@@ -15,6 +15,12 @@ const refresh = async ($: EngineInterface): Promise<void> => {
     parts.push(`${LABELS[limit.kind] ?? limit.kind} ${Math.round(limit.percentUsed)}%`)
   }
 
+  // No rate-limit windows (API or usage-based billing): show what the session
+  // has cost instead.
+  if (usage.rateLimits.length === 0 && usage.cost !== undefined && usage.cost.usd > 0) {
+    parts.push(`$${usage.cost.usd.toFixed(2)}`)
+  }
+
   if (usage.context.percent !== undefined) {
     parts.push(`ctx ${usage.context.percent}%`)
   }

@@ -15,11 +15,18 @@ Fable 5.2 · 5h 23% · 7d 41% · ctx 12%
 - **5h / 7d** — how much of each subscription rate-limit window is used
 - **ctx** — how full the context window is
 
+On an account with no rate-limit windows (API or usage-based billing, as on
+many enterprise plans) the line shows what the session has cost so far
+instead:
+
+```
+Fable 5.2 · $1.23 · ctx 12%
+```
+
 The line refreshes at session start, at the start and end of each turn,
 whenever a rate-limit window moves a whole point, and after any slash command
 (so a `/model` switch shows at once). The usage figures appear after the first
-response of a session reports them; rate-limit windows show only on a
-subscription.
+response of a session reports them.
 
 ### Install
 
