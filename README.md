@@ -16,12 +16,17 @@ Fable 5.2 · 5h 23% · 7d 41% · ctx 12%
 - **ctx** — how full the context window is
 
 On an account with no rate-limit windows (API or usage-based billing, as on
-many enterprise plans) the line shows what the session has cost so far
-instead:
+many enterprise plans) the line shows cost instead: what this session has cost
+so far, and what all your sessions have cost this calendar month:
 
 ```
-Fable 5.2 · $1.23 · ctx 12%
+Fable 5.2 · $1.23 session · $48.10 month · ctx 12%
 ```
+
+The session figure covers every model the session used, subagents included.
+The month figure is the mod's own tally, not your organization's bill: it
+counts only Claude Code sessions on this machine, only from the day the mod
+was installed, and only sessions that ran with the mod loaded.
 
 The line refreshes at session start, at the start and end of each turn,
 whenever a rate-limit window moves a whole point, and after any slash command
