@@ -21,8 +21,8 @@ Fable 5.2 · 5h 23% · 7d 41% · ctx 12%
 A part the account has no figure for is left out.
 
 While a subagent's transcript is on screen the line shows that subagent's
-model and context instead, named by its type: `Explore: Haiku 5.5 · 5h 23% ·
-ctx 45k`. A subagent on another model than the session's shows its context in
+model and context instead, with its type beside it: `Haiku 5.5 (Explore) ·
+5h 23% · ctx 45k`. Its context appears once its first response has finished. A subagent on another model than the session's shows its context in
 tokens, since only the session model's window size is known. The usage
 percentages are the account's, so they read the same in either view.
 

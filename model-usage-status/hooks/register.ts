@@ -94,19 +94,22 @@ const readPlan = async ($: EngineInterface, canFetch: boolean): Promise<Plan | u
   return plan?.value
 }
 
-// What each subagent's last response reported: the model that answered and
-// how many tokens it was answered over. The engine's own figures are the main
+// Each subagent's model, known from its first request on, and how many tokens
+// its last finished response was answered over. The engine's own figures are the main
 // conversation's alone, so a subagent's are gathered from its steps.
-type Step = { model: string; tokens: number }
+type Step = { model: string; tokens?: number }
 
 const agents = new Map<string, Step>()
 let mainModelId: string | undefined
 // The agent whose transcript is on screen; undefined for the main conversation.
 let viewed: string | undefined
 
+/** A model id without a variant suffix such as `[1m]`. */
+const bareId = (id: string): string => id.replace(/\[[^\]]*\]$/, '')
+
 /** `claude-opus-5-5-20260101` as `Opus 5.5`. */
 const modelName = (id: string): string => {
-  const words = id.split('-').filter(word => word !== 'claude' && !/^\d{8}$/.test(word))
+  const words = bareId(id).split('-').filter(word => word !== 'claude' && !/^\d{8}$/.test(word))
   const names = words.filter(word => !/^\d+$/.test(word))
   const version = words.filter(word => /^\d+$/.test(word)).join('.')
   const name = names.map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
@@ -132,9 +135,10 @@ const refresh = async ($: EngineInterface, canFetch: boolean): Promise<void> => 
   const parts: string[] = []
 
   if (isAgentView) {
-    const label = agent?.name ?? agent?.type ?? 'subagent'
+    const label = agent?.name ?? agent?.type
+    const name = step === undefined ? 'subagent' : modelName(step.model)
 
-    parts.push(step === undefined ? label : `${label}: ${modelName(step.model)}`)
+    parts.push(label === undefined ? name : `${name} (${label})`)
   } else {
     parts.push(model)
   }
@@ -154,7 +158,7 @@ const refresh = async ($: EngineInterface, canFetch: boolean): Promise<void> => 
   if (isAgentView) {
     // The window is known only for the session's own model: a subagent on
     // another model shows its tokens instead of a share.
-    if (step !== undefined) {
+    if (step?.tokens !== undefined) {
       const hasSameWindow = step.model === mainModelId && usage.context.window > 0
 
       parts.push(
@@ -203,21 +207,33 @@ export const register: Register = on => {
   // Each model response, main's and every subagent's: where a subagent's
   // model and context fill come from.
   on('turn.step', async function* ($, e, next) {
+    const { agentId } = e
+
+    // The model is known as the request leaves, well before a long response
+    // has finished.
+    if (agentId !== undefined && agents.get(agentId)?.model !== bareId(e.model)) {
+      agents.set(agentId, { ...agents.get(agentId), model: bareId(e.model) })
+
+      if (agentId === viewed) {
+        await refresh($, false)
+      }
+    }
+
     const response = yield* next(e)
 
     if (response.usage !== null) {
-      const { model, input_tokens, cache_read_input_tokens, cache_creation_input_tokens } =
-        response.usage
+      const { input_tokens, cache_read_input_tokens, cache_creation_input_tokens } = response.usage
+      const model = bareId(response.usage.model)
 
-      if (e.agentId === undefined) {
+      if (agentId === undefined) {
         mainModelId = model
       } else {
-        agents.set(e.agentId, {
+        agents.set(agentId, {
           model,
           tokens: input_tokens + cache_read_input_tokens + cache_creation_input_tokens,
         })
 
-        if (e.agentId === viewed) {
+        if (agentId === viewed) {
           await refresh($, false)
         }
       }

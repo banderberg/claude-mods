@@ -128,10 +128,44 @@ test('viewing a subagent shows its model and context, and main again after', asy
   }
 
   const inAgent = await $.ui.mount({ ...BAND, props: { ...BAND.props, view: { agentId: 'a1' } } })
-  expect(JSON.stringify(lines.at(-1))).toContain('Explore: Haiku 5.5 · 5h 23% · ctx 45k')
+  expect(JSON.stringify(lines.at(-1))).toContain('Haiku 5.5 (Explore) · 5h 23% · ctx 45k')
   await inAgent.unmount()
 
   const inMain = await $.ui.mount({ ...BAND, props: { ...BAND.props, view: {} } })
   expect(JSON.stringify(lines.at(-1))).toContain('Fable 5.2 · 5h 23% · ctx 12%')
   await inMain.unmount()
+})
+
+test('a subagent still on its first response already shows its model', async ($, on) => {
+  const lines = world(on, { startedAt: 0, context: CONTEXT, rateLimits: [] }, {})
+  let release = (): void => {}
+  const held = new Promise<void>(resolve => {
+    release = resolve
+  })
+  on('turn.step', async function* () {
+    await held
+
+    return reply('claude-opus-5-5', 9000)
+  })
+
+  await $.session.start(START)
+
+  const stream = $.turn.step({
+    turnId: 't',
+    index: 0,
+    model: 'claude-opus-5-5[1m]',
+    messageCount: 1,
+    agentId: 'a1',
+  })
+  const pending = stream.next()
+  await Promise.resolve()
+
+  const inAgent = await $.ui.mount({ ...BAND, props: { ...BAND.props, view: { agentId: 'a1' } } })
+  expect(JSON.stringify(lines.at(-1))).toContain('Opus 5.5 (Explore)')
+  expect(JSON.stringify(lines.at(-1))).not.toContain('ctx')
+
+  release()
+  await pending
+  expect(JSON.stringify(lines.at(-1))).toContain('Opus 5.5 (Explore) · ctx 9k')
+  await inAgent.unmount()
 })
