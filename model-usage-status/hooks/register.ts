@@ -1,4 +1,7 @@
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
+
+import type { AgentStep, Line } from '../types'
 
 const LABELS: Record<string, string> = {
   five_hour: '5h',
@@ -94,15 +97,15 @@ const readPlan = async ($: EngineInterface, canFetch: boolean): Promise<Plan | u
   return plan?.value
 }
 
-// Each subagent's model, known from its first request on, and how many tokens
-// its last finished response was answered over. The engine's own figures are the main
-// conversation's alone, so a subagent's are gathered from its steps.
-type Step = { model: string; tokens?: number }
+// What the line is written from lives in `$.state`, not in this module: the
+// hook that draws runs apart from the hooks that measure, and only the
+// session's state is common to both.
+const EMPTY: Line = { model: '', modelId: null, usage: [], context: '', window: 0, agents: {} }
+const line = atom({ plugin: 'model-usage-status', key: 'line' } as const, EMPTY)
 
-const agents = new Map<string, Step>()
-let mainModelId: string | undefined
-// The agent whose transcript is on screen; undefined for the main conversation.
-let viewed: string | undefined
+// Where the band above the prompt is drawn, and so where the line can follow
+// the transcript in view.
+const BAND_SURFACES = ['terminal', 'desktop', 'mobile']
 
 /** A model id without a variant suffix such as `[1m]`. */
 const bareId = (id: string): string => id.replace(/\[[^\]]*\]$/, '')
@@ -120,63 +123,104 @@ const modelName = (id: string): string => {
 const tokenCount = (tokens: number): string =>
   tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens)
 
-const refresh = async ($: EngineInterface, canFetch: boolean): Promise<void> => {
-  const [model, usage, account, running] = await Promise.all([
+/** The line for the transcript in view: the main conversation's, or one agent's. */
+const textFor = (state: Line, agentId: string | undefined): string | undefined => {
+  if (state.model === '') {
+    return undefined
+  }
+
+  const agent = agentId === undefined ? undefined : state.agents[agentId]
+
+  if (agentId === undefined || agent === undefined) {
+    return [state.model, ...state.usage, state.context].filter(part => part !== '').join(' · ')
+  }
+
+  const name = agent.model === undefined ? 'subagent' : modelName(agent.model)
+  const parts = [agent.label === undefined ? name : `${name} (${agent.label})`, ...state.usage]
+
+  // The window is known only for the session's own model: a subagent on
+  // another model shows its tokens instead of a share.
+  if (agent.tokens !== undefined) {
+    const hasSameWindow = agent.model === state.modelId && state.window > 0
+
+    parts.push(
+      hasSameWindow
+        ? `ctx ${Math.round((agent.tokens / state.window) * 100)}%`
+        : `ctx ${tokenCount(agent.tokens)}`,
+    )
+  }
+
+  return parts.join(' · ')
+}
+
+/**
+ * Writes the line where no band is drawn to follow the view. Elsewhere the
+ * band's hook writes it, on each change of the state and of the view.
+ */
+const writeUnfollowed = async ($: EngineInterface): Promise<void> => {
+  const surface = await $.session.surface()
+
+  if (surface !== null && !BAND_SURFACES.includes(surface)) {
+    const text = textFor(await read($, line), undefined)
+
+    if (text !== undefined) {
+      $.ui.status(text)
+    }
+  }
+}
+
+/** Measures the main conversation and the account, and stores what the line shows. */
+const measure = async ($: EngineInterface, canFetch: boolean): Promise<void> => {
+  const [model, usage, account] = await Promise.all([
     $.session.model(),
     $.session.usage(),
     readPlan($, canFetch),
-    viewed === undefined ? undefined : $.agent.list(),
   ])
 
-  const agent = running?.find(candidate => candidate.id === viewed)
-  const step = viewed === undefined ? undefined : agents.get(viewed)
-  const isAgentView = viewed !== undefined && (agent !== undefined || step !== undefined)
-
-  const parts: string[] = []
-
-  if (isAgentView) {
-    const label = agent?.name ?? agent?.type
-    const name = step === undefined ? 'subagent' : modelName(step.model)
-
-    parts.push(label === undefined ? name : `${name} (${label})`)
-  } else {
-    parts.push(model)
-  }
-
   const windows: Window[] = usage.rateLimits.length > 0 ? usage.rateLimits : (account?.windows ?? [])
-
-  for (const limit of windows) {
-    parts.push(`${LABELS[limit.kind] ?? limit.kind} ${Math.round(limit.percentUsed)}%`)
-  }
-
+  const parts = windows.map(
+    limit => `${LABELS[limit.kind] ?? limit.kind} ${Math.round(limit.percentUsed)}%`,
+  )
   const hasSpend = windows.some(limit => limit.kind === 'spend_limit')
 
   if (!hasSpend && account?.spendPercent !== undefined) {
     parts.push(`spend ${Math.round(account.spendPercent)}%`)
   }
 
-  if (isAgentView) {
-    // The window is known only for the session's own model: a subagent on
-    // another model shows its tokens instead of a share.
-    if (step?.tokens !== undefined) {
-      const hasSameWindow = step.model === mainModelId && usage.context.window > 0
+  const context = usage.context.percent === undefined ? '' : `ctx ${usage.context.percent}%`
 
-      parts.push(
-        hasSameWindow
-          ? `ctx ${Math.round((step.tokens / usage.context.window) * 100)}%`
-          : `ctx ${tokenCount(step.tokens)}`,
-      )
-    }
-  } else if (usage.context.percent !== undefined) {
-    parts.push(`ctx ${usage.context.percent}%`)
+  await update($, line, state => ({
+    ...state,
+    model,
+    usage: parts,
+    context,
+    window: usage.context.window,
+  }))
+  await writeUnfollowed($)
+}
+
+/** Stores what is newly known of one subagent, with what it was spawned as. */
+const noteAgent = async ($: EngineInterface, agentId: string, known: AgentStep): Promise<void> => {
+  const before = (await read($, line)).agents[agentId]
+  const label =
+    before?.label ??
+    (await $.agent.list())
+      .filter(agent => agent.id === agentId)
+      .map(agent => agent.name ?? agent.type)[0]
+  const after: AgentStep = { ...before, ...known, ...(label === undefined ? {} : { label }) }
+
+  if (
+    before?.model !== after.model ||
+    before?.label !== after.label ||
+    before?.tokens !== after.tokens
+  ) {
+    await update($, line, state => ({ ...state, agents: { ...state.agents, [agentId]: after } }))
   }
-
-  $.ui.status(parts.join(' · '))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await refresh($, true)
+    await measure($, true)
 
     return next(e)
   })
@@ -184,7 +228,9 @@ export const register: Register = on => {
   // Never holds a turn up on the network: the last reading is drawn.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
-      await refresh($, false)
+      await measure($, false)
+    } else {
+      await noteAgent($, e.agentId, {})
     }
 
     return next(e)
@@ -193,16 +239,29 @@ export const register: Register = on => {
   // Usage figures are pushed here after each main-thread turn and whenever a
   // rate-limit window moves a whole point.
   on('session.measure', async ($, e, next) => {
-    await refresh($, true)
+    await measure($, true)
 
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    await refresh($, true)
+    if (e.agentId === undefined) {
+      await measure($, true)
+    }
 
     return next(e)
   })
+
+  // A subagent's model, as soon as it is started.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+
+    if (started.agentId !== undefined && started.model !== undefined) {
+      await noteAgent($, started.agentId, { model: bareId(started.model) })
+    }
+
+    return started
+  }).catch(($, e, next) => next(e))
 
   // Each model response, main's and every subagent's: where a subagent's
   // model and context fill come from.
@@ -211,12 +270,8 @@ export const register: Register = on => {
 
     // The model is known as the request leaves, well before a long response
     // has finished.
-    if (agentId !== undefined && agents.get(agentId)?.model !== bareId(e.model)) {
-      agents.set(agentId, { ...agents.get(agentId), model: bareId(e.model) })
-
-      if (agentId === viewed) {
-        await refresh($, false)
-      }
+    if (agentId !== undefined) {
+      await noteAgent($, agentId, { model: bareId(e.model) })
     }
 
     const response = yield* next(e)
@@ -225,30 +280,27 @@ export const register: Register = on => {
       const { input_tokens, cache_read_input_tokens, cache_creation_input_tokens } = response.usage
       const model = bareId(response.usage.model)
 
-      if (agentId === undefined) {
-        mainModelId = model
-      } else {
-        agents.set(agentId, {
+      if (agentId !== undefined) {
+        await noteAgent($, agentId, {
           model,
           tokens: input_tokens + cache_read_input_tokens + cache_creation_input_tokens,
         })
-
-        if (agentId === viewed) {
-          await refresh($, false)
-        }
+      } else if ((await read($, line)).modelId !== model) {
+        await update($, line, state => ({ ...state, modelId: model }))
       }
     }
 
     return response
   })
 
-  // Draws nothing: the band is asked again whenever the person switches
-  // between the main conversation and a subagent's, which is how the line
-  // learns whose figures to show.
+  // Draws nothing. The band is asked again whenever the person switches
+  // between the main conversation and a subagent's, and whenever the state
+  // read here changes: each time, the line is written for the view on screen.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.view.agentId !== viewed) {
-      viewed = e.props.view.agentId
-      await refresh($, false)
+    const text = textFor(await read($, line), e.props.view.agentId)
+
+    if (text !== undefined) {
+      $.ui.status(text)
     }
 
     return next(e)
@@ -257,7 +309,7 @@ export const register: Register = on => {
   // A slash command such as /model can change the model between turns.
   on('command.run', async ($, e, next) => {
     const result = await next(e)
-    await refresh($, true)
+    await measure($, true)
 
     return result
   }).catch(($, e, next) => next(e))

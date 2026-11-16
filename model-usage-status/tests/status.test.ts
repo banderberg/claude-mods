@@ -15,68 +15,11 @@ const world = (on: On, usage: unknown, account: unknown): unknown[] => {
   )
   on('ui.status', (_, e) => (lines.push(e), { value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.surface', () => ({ value: 'terminal' as const }))
   on('agent.list', () => ({ value: [{ id: 'a1', description: 'look', type: 'Explore', status: 'running' }] }))
 
   return lines
 }
-
-const START = { cwd: '/', surface: 'terminal', isInteractive: true } as const
-const CONTEXT = { window: 200000, percent: 12 }
-
-test('the engine windows are shown, and a disabled spend limit is not', async ($, on) => {
-  const lines = world(
-    on,
-    {
-      startedAt: 0,
-      context: CONTEXT,
-      rateLimits: [
-        { kind: 'five_hour', percentUsed: 23.4 },
-        { kind: 'seven_day', percentUsed: 41 },
-      ],
-    },
-    { spend: { enabled: false, limit: null, percent: 0 }, extra_usage: { is_enabled: false } },
-  )
-
-  await $.session.start(START)
-
-  expect(JSON.stringify(lines.at(-1))).toContain('Fable 5.2 · 5h 23% · 7d 41% · ctx 12%')
-})
-
-test('a plan with a spend limit shows the share used', async ($, on) => {
-  const lines = world(
-    on,
-    { startedAt: 0, context: CONTEXT, rateLimits: [] },
-    {
-      five_hour: null,
-      seven_day: null,
-      spend: { enabled: true, limit: { amount_minor: 50000 }, percent: 37.2 },
-    },
-  )
-
-  await $.session.start(START)
-
-  expect(JSON.stringify(lines.at(-1))).toContain('Fable 5.2 · spend 37% · ctx 12%')
-})
-
-test('the account windows fill in before the engine has a reading', async ($, on) => {
-  const lines = world(
-    on,
-    { startedAt: 0, context: { window: 200000 }, rateLimits: [] },
-    { five_hour: { utilization: 4 }, seven_day: { utilization: 13 }, spend: { enabled: false } },
-  )
-
-  await $.session.start(START)
-
-  expect(JSON.stringify(lines.at(-1))).toContain('Fable 5.2 · 5h 4% · 7d 13%')
-})
-
-test('a failed usage request leaves the model and context', async ($, on) => {
-  const lines = world(on, { startedAt: 0, context: CONTEXT, rateLimits: [] }, undefined)
-
-  await $.session.start(START)
-
-  expect(JSON.stringify(lines.at(-1))).toContain('Fable 5.2 · ctx 12%')
-})
 
 const BAND = {
   plugin: 'model-usage-status',
@@ -107,6 +50,74 @@ const reply = (model: string, tokens: number) => ({
   },
 })
 
+/** What the line reads with this transcript on screen. */
+const shown = async ($: Parameters<Parameters<typeof test>[1]>[0], lines: unknown[], agentId?: string) => {
+  const view = agentId === undefined ? {} : { agentId }
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, view } })
+  const last = JSON.stringify(lines.at(-1))
+  await ui.unmount()
+
+  return last
+}
+
+const START = { cwd: '/', surface: 'terminal', isInteractive: true } as const
+const CONTEXT = { window: 200000, percent: 12 }
+
+test('the engine windows are shown, and a disabled spend limit is not', async ($, on) => {
+  const lines = world(
+    on,
+    {
+      startedAt: 0,
+      context: CONTEXT,
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 23.4 },
+        { kind: 'seven_day', percentUsed: 41 },
+      ],
+    },
+    { spend: { enabled: false, limit: null, percent: 0 }, extra_usage: { is_enabled: false } },
+  )
+
+  await $.session.start(START)
+
+  expect(await shown($, lines)).toContain('Fable 5.2 · 5h 23% · 7d 41% · ctx 12%')
+})
+
+test('a plan with a spend limit shows the share used', async ($, on) => {
+  const lines = world(
+    on,
+    { startedAt: 0, context: CONTEXT, rateLimits: [] },
+    {
+      five_hour: null,
+      seven_day: null,
+      spend: { enabled: true, limit: { amount_minor: 50000 }, percent: 37.2 },
+    },
+  )
+
+  await $.session.start(START)
+
+  expect(await shown($, lines)).toContain('Fable 5.2 · spend 37% · ctx 12%')
+})
+
+test('the account windows fill in before the engine has a reading', async ($, on) => {
+  const lines = world(
+    on,
+    { startedAt: 0, context: { window: 200000 }, rateLimits: [] },
+    { five_hour: { utilization: 4 }, seven_day: { utilization: 13 }, spend: { enabled: false } },
+  )
+
+  await $.session.start(START)
+
+  expect(await shown($, lines)).toContain('Fable 5.2 · 5h 4% · 7d 13%')
+})
+
+test('a failed usage request leaves the model and context', async ($, on) => {
+  const lines = world(on, { startedAt: 0, context: CONTEXT, rateLimits: [] }, undefined)
+
+  await $.session.start(START)
+
+  expect(await shown($, lines)).toContain('Fable 5.2 · ctx 12%')
+})
+
 test('viewing a subagent shows its model and context, and main again after', async ($, on) => {
   const lines = world(
     on,
@@ -127,13 +138,8 @@ test('viewing a subagent shows its model and context, and main again after', asy
     // drain
   }
 
-  const inAgent = await $.ui.mount({ ...BAND, props: { ...BAND.props, view: { agentId: 'a1' } } })
-  expect(JSON.stringify(lines.at(-1))).toContain('Haiku 5.5 (Explore) · 5h 23% · ctx 45k')
-  await inAgent.unmount()
-
-  const inMain = await $.ui.mount({ ...BAND, props: { ...BAND.props, view: {} } })
-  expect(JSON.stringify(lines.at(-1))).toContain('Fable 5.2 · 5h 23% · ctx 12%')
-  await inMain.unmount()
+  expect(await shown($, lines, 'a1')).toContain('Haiku 5.5 (Explore) · 5h 23% · ctx 45k')
+  expect(await shown($, lines)).toContain('Fable 5.2 · 5h 23% · ctx 12%')
 })
 
 test('a subagent still on its first response already shows its model', async ($, on) => {
@@ -158,14 +164,13 @@ test('a subagent still on its first response already shows its model', async ($,
     agentId: 'a1',
   })
   const pending = stream.next()
-  await Promise.resolve()
+  await new Promise<void>(resolve => setTimeout(resolve, 50))
 
-  const inAgent = await $.ui.mount({ ...BAND, props: { ...BAND.props, view: { agentId: 'a1' } } })
-  expect(JSON.stringify(lines.at(-1))).toContain('Opus 5.5 (Explore)')
-  expect(JSON.stringify(lines.at(-1))).not.toContain('ctx')
+  const early = await shown($, lines, 'a1')
+  expect(early).toContain('Opus 5.5 (Explore)')
+  expect(early).not.toContain('ctx')
 
   release()
   await pending
-  expect(JSON.stringify(lines.at(-1))).toContain('Opus 5.5 (Explore) · ctx 9k')
-  await inAgent.unmount()
+  expect(await shown($, lines, 'a1')).toContain('Opus 5.5 (Explore) · ctx 9k')
 })
