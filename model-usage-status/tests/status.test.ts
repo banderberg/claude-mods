@@ -2,9 +2,16 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-const world = (on: On, usage: unknown, account: unknown): unknown[] => {
+const world = (
+  on: On,
+  usage: unknown,
+  account: unknown,
+  stored: Record<string, unknown> = {},
+): unknown[] => {
   const lines: unknown[] = []
   mock.clock(on, { now: 1_000_000 })
+  mock.store(on, stored)
+  on('command.register', () => ({ value: { command: 'usage-status-check' } }))
   on('session.model', () => ({ value: 'Fable 5.2' }))
   on('session.usage', () => ({ value: usage as never }))
   on('session.authorize', () => ({ value: { handle: 'h', kind: 'bearer' } }))
@@ -173,4 +180,14 @@ test('a subagent still on its first response already shows its model', async ($,
   release()
   await pending
   expect(await shown($, lines, 'a1')).toContain('Opus 5.5 (Explore) · ctx 9k')
+})
+
+test('a refused usage request keeps the last stored reading', async ($, on) => {
+  const lines = world(on, { startedAt: 0, context: CONTEXT, rateLimits: [] }, undefined, {
+    plan: { value: { windows: [], spendPercent: 37 }, readAt: 1_000_000 - 30 * 60 * 1000 },
+  })
+
+  await $.session.start(START)
+
+  expect(await shown($, lines)).toContain('Fable 5.2 · spend 37% · ctx 12%')
 })

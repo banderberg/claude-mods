@@ -15,11 +15,22 @@ const LABELS: Record<string, string> = {
 // mod asks for both here with the session's own sign-in.
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const PLAN_MAX_AGE_MS = 60 * 1000
+// A reading that could not be renewed is still shown this long: a spend limit
+// moves slowly, and a stale share says more than none.
+const PLAN_STALE_AGE_MS = 6 * 60 * 60 * 1000
+// After a refused or failed request, how long before the next one.
+const RETRY_AFTER_MS = 5 * 60 * 1000
+const PLAN_KEY = 'plan'
+// Kept in step with plugin.json; shown by /usage-status-check.
+const VERSION = '0.7.0'
 
 type Window = { kind: string; percentUsed: number }
 type Plan = { windows: Window[]; spendPercent?: number }
 
-let plan: { value: Plan; readAt: number } | undefined
+type Reading = { value: Plan; readAt: number }
+
+// The last request that got no reading: when, and what came back.
+let failure: { at: number; reason: string } | undefined
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
@@ -63,38 +74,110 @@ const parsePlan = (text: string): Plan | undefined => {
   return { windows, spendPercent: spendPercentOf(body) }
 }
 
-/**
- * Reads the account's usage, at most once a minute. Any failure (no
- * subscription sign-in, an offline or refused request, an answer in another
- * shape) leaves the last reading in place: the line then shows what the engine
- * has alone.
- */
-const readPlan = async ($: EngineInterface, canFetch: boolean): Promise<Plan | undefined> => {
-  const now = await $.clock.now()
-
-  if (!canFetch || (plan !== undefined && now - plan.readAt < PLAN_MAX_AGE_MS)) {
-    return plan?.value
+const asReading = (stored: unknown): Reading | undefined => {
+  if (!isRecord(stored) || typeof stored.readAt !== 'number' || !isRecord(stored.value)) {
+    return undefined
   }
 
+  const { windows, spendPercent } = stored.value
+  const kept = (Array.isArray(windows) ? windows : []).filter(
+    (one): one is Window =>
+      isRecord(one) && typeof one.kind === 'string' && typeof one.percentUsed === 'number',
+  )
+
+  return { value: { windows: kept, spendPercent: asPercent(spendPercent) }, readAt: stored.readAt }
+}
+
+/** Asks the usage endpoint now: the reply's text, or why there is none. */
+const fetchUsage = async ($: EngineInterface): Promise<{ text?: string; reason: string }> => {
   try {
     const auth = await $.session.authorize()
 
-    if (auth?.kind === 'bearer') {
-      const response = await $.http.fetch(USAGE_URL, {
-        auth: auth.handle,
-        headers: { 'anthropic-beta': 'oauth-2025-04-20' },
-      })
-      const value = response.ok ? parsePlan(response.text) : undefined
-
-      if (value !== undefined) {
-        plan = { value, readAt: now }
-      }
+    if (auth?.kind !== 'bearer') {
+      return { reason: `no claude.ai sign-in to ask with (${auth?.kind ?? 'none'})` }
     }
-  } catch {
-    // Keep the last reading.
+
+    const response = await $.http.fetch(USAGE_URL, {
+      auth: auth.handle,
+      headers: { 'anthropic-beta': 'oauth-2025-04-20' },
+    })
+
+    return response.ok
+      ? { text: response.text, reason: `HTTP ${response.status}` }
+      : { reason: `HTTP ${response.status}` }
+  } catch (error) {
+    return { reason: `request failed: ${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/**
+ * Reads the account's usage, asking at most once a minute across this
+ * machine's sessions: the reading is kept in the mod's store. Any failure (no
+ * subscription sign-in, an offline, refused or rate-limited request, an answer
+ * in another shape) leaves the last reading in place for a few hours, and the
+ * next request waits a few minutes.
+ */
+const readPlan = async ($: EngineInterface, canFetch: boolean): Promise<Plan | undefined> => {
+  const now = await $.clock.now()
+  const stored = asReading(await $.store.get(PLAN_KEY))
+  const isFresh = stored !== undefined && now - stored.readAt < PLAN_MAX_AGE_MS
+  const isWaiting = failure !== undefined && now - failure.at < RETRY_AFTER_MS
+
+  if (canFetch && !isFresh && !isWaiting) {
+    const { text, reason } = await fetchUsage($)
+    let value: Plan | undefined
+
+    try {
+      value = text === undefined ? undefined : parsePlan(text)
+    } catch {
+      value = undefined
+    }
+
+    if (value !== undefined) {
+      failure = undefined
+      await $.store.set(PLAN_KEY, { value, readAt: now } satisfies Reading)
+
+      return value
+    }
+
+    failure = { at: now, reason: text === undefined ? reason : 'an answer in another shape' }
   }
 
-  return plan?.value
+  return stored !== undefined && now - stored.readAt < PLAN_STALE_AGE_MS ? stored.value : undefined
+}
+
+/** The parts of a reply that bear on a spend limit, for the person to read. */
+const describeReply = (text: string): string[] => {
+  let body: unknown
+
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return ['reply: not JSON']
+  }
+
+  if (!isRecord(body)) {
+    return ['reply: not an object']
+  }
+
+  const filled = Object.keys(body).filter(key => body[key] !== null)
+  const limits = Array.isArray(body.limits)
+    ? body.limits.map(one => (isRecord(one) ? `${String(one.kind)} ${String(one.percent)}%` : '?'))
+    : []
+  const dollars = filled.filter(key => {
+    const entry = body[key]
+
+    return isRecord(entry) && (entry.limit_dollars != null || entry.used_dollars != null)
+  })
+
+  return [
+    `reply fields with a value: ${filled.join(', ')}`,
+    `spend: ${JSON.stringify(body.spend ?? null)}`,
+    `extra_usage: ${JSON.stringify(body.extra_usage ?? null)}`,
+    `limits: ${limits.join(', ') || 'none'}`,
+    `fields with dollar amounts: ${dollars.map(key => `${key} ${JSON.stringify(body[key])}`).join('; ') || 'none'}`,
+    `spend share the mod reads: ${spendPercentOf(body) ?? 'none'}`,
+  ]
 }
 
 // What the line is written from lives in `$.state`, not in this module: the
@@ -220,6 +303,10 @@ const noteAgent = async ($: EngineInterface, agentId: string, known: AgentStep):
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'usage-status-check',
+      description: 'Show what the account reports for the model-usage-status line',
+    })
     await measure($, true)
 
     return next(e)
@@ -304,6 +391,22 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  // Why a part of the line is missing: what the account's reply holds now.
+  on('command.run', { command: 'usage-status-check' }, async $ => {
+    const { text, reason } = await fetchUsage($)
+    const state = await read($, line)
+
+    return {
+      text: [
+        `${$.plugin.name} ${VERSION}`,
+        `usage request: ${reason}`,
+        ...(text === undefined ? [] : describeReply(text)),
+        `last failed request: ${failure?.reason ?? 'none'}`,
+        `line now: ${textFor(state, undefined) ?? 'not measured yet'}`,
+      ].join('\n'),
+    }
   })
 
   // A slash command such as /model can change the model between turns.

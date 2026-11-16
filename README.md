@@ -35,13 +35,22 @@ whenever a rate-limit window moves a whole point, and after any slash command
 To read the spend limit, and the rate-limit windows before the session's first
 response, the mod asks Anthropic's own usage endpoint
 (`https://api.anthropic.com/api/oauth/usage`, the one Claude Code's `/usage`
-screen reads) at most once a minute, signed in as the session is. The sign-in
+screen reads) at most once a minute across this machine's sessions, signed in as the
+session is. The sign-in
 stays with Claude Code: the mod never sees it, and the request goes nowhere
 else. It needs a claude.ai sign-in; with an API key, a gateway or a cloud
 provider, or with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, no request
 is made and the line shows what Claude Code itself reports. That endpoint is
 not a documented API, so its answer may change shape; the mod then drops the
 parts it can no longer read.
+
+### When a part is missing
+
+`/usage-status-check` asks the usage endpoint once and prints what came back:
+whether the request went through, which fields the account's reply holds, and
+the spend share the mod reads from it. The last good reading is kept for this
+machine's sessions and shown for a few hours when a request is refused or
+rate-limited.
 
 ### Install
 
