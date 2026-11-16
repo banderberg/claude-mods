@@ -13,13 +13,29 @@ Fable 5.2 · 5h 23% · 7d 41% · ctx 12%
 
 - **model** — the main loop's model, as `/model` shows it
 - **5h / 7d** — how much of each subscription rate-limit window is used
+- **spend** — how much of the plan's spend limit is used, on a plan that has
+  one (a work plan with a monthly spend limit, or extra usage switched on):
+  `Fable 5.2 · spend 37% · ctx 12%`
 - **ctx** — how full the context window is
+
+A part the account has no figure for is left out.
 
 The line refreshes at session start, at the start and end of each turn,
 whenever a rate-limit window moves a whole point, and after any slash command
-(so a `/model` switch shows at once). The usage figures appear after the first
-response of a session reports them; rate-limit windows show only on a
-subscription.
+(so a `/model` switch shows at once).
+
+### What it sends
+
+To read the spend limit, and the rate-limit windows before the session's first
+response, the mod asks Anthropic's own usage endpoint
+(`https://api.anthropic.com/api/oauth/usage`, the one Claude Code's `/usage`
+screen reads) at most once a minute, signed in as the session is. The sign-in
+stays with Claude Code: the mod never sees it, and the request goes nowhere
+else. It needs a claude.ai sign-in; with an API key, a gateway or a cloud
+provider, or with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, no request
+is made and the line shows what Claude Code itself reports. That endpoint is
+not a documented API, so its answer may change shape; the mod then drops the
+parts it can no longer read.
 
 ### Install
 
