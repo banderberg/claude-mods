@@ -1,0 +1,11 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "banderberg" },
+  "plugins": [
+    {
+      "name": "model-usage-status",
+      "source": "./model-usage-status",
+      "description": "Pins the current model and usage percentages (rate-limit windows and context) under the prompt."
+    }
+  ]
+}
