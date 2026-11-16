@@ -94,14 +94,51 @@ const readPlan = async ($: EngineInterface, canFetch: boolean): Promise<Plan | u
   return plan?.value
 }
 
+// What each subagent's last response reported: the model that answered and
+// how many tokens it was answered over. The engine's own figures are the main
+// conversation's alone, so a subagent's are gathered from its steps.
+type Step = { model: string; tokens: number }
+
+const agents = new Map<string, Step>()
+let mainModelId: string | undefined
+// The agent whose transcript is on screen; undefined for the main conversation.
+let viewed: string | undefined
+
+/** `claude-opus-5-5-20260101` as `Opus 5.5`. */
+const modelName = (id: string): string => {
+  const words = id.split('-').filter(word => word !== 'claude' && !/^\d{8}$/.test(word))
+  const names = words.filter(word => !/^\d+$/.test(word))
+  const version = words.filter(word => /^\d+$/.test(word)).join('.')
+  const name = names.map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+
+  return [name, version].filter(part => part !== '').join(' ') || id
+}
+
+const tokenCount = (tokens: number): string =>
+  tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens)
+
 const refresh = async ($: EngineInterface, canFetch: boolean): Promise<void> => {
-  const [model, usage, account] = await Promise.all([
+  const [model, usage, account, running] = await Promise.all([
     $.session.model(),
     $.session.usage(),
     readPlan($, canFetch),
+    viewed === undefined ? undefined : $.agent.list(),
   ])
 
-  const parts = [model]
+  const agent = running?.find(candidate => candidate.id === viewed)
+  const step = viewed === undefined ? undefined : agents.get(viewed)
+  const isAgentView = viewed !== undefined && (agent !== undefined || step !== undefined)
+
+  const parts: string[] = []
+
+  if (isAgentView) {
+    const label = agent?.name ?? agent?.type ?? 'subagent'
+
+    parts.push(step === undefined ? label : `${label}: ${modelName(step.model)}`)
+  } else {
+    parts.push(model)
+  }
+
   const windows: Window[] = usage.rateLimits.length > 0 ? usage.rateLimits : (account?.windows ?? [])
 
   for (const limit of windows) {
@@ -114,7 +151,19 @@ const refresh = async ($: EngineInterface, canFetch: boolean): Promise<void> => 
     parts.push(`spend ${Math.round(account.spendPercent)}%`)
   }
 
-  if (usage.context.percent !== undefined) {
+  if (isAgentView) {
+    // The window is known only for the session's own model: a subagent on
+    // another model shows its tokens instead of a share.
+    if (step !== undefined) {
+      const hasSameWindow = step.model === mainModelId && usage.context.window > 0
+
+      parts.push(
+        hasSameWindow
+          ? `ctx ${Math.round((step.tokens / usage.context.window) * 100)}%`
+          : `ctx ${tokenCount(step.tokens)}`,
+      )
+    }
+  } else if (usage.context.percent !== undefined) {
     parts.push(`ctx ${usage.context.percent}%`)
   }
 
@@ -147,6 +196,44 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     await refresh($, true)
+
+    return next(e)
+  })
+
+  // Each model response, main's and every subagent's: where a subagent's
+  // model and context fill come from.
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+
+    if (response.usage !== null) {
+      const { model, input_tokens, cache_read_input_tokens, cache_creation_input_tokens } =
+        response.usage
+
+      if (e.agentId === undefined) {
+        mainModelId = model
+      } else {
+        agents.set(e.agentId, {
+          model,
+          tokens: input_tokens + cache_read_input_tokens + cache_creation_input_tokens,
+        })
+
+        if (e.agentId === viewed) {
+          await refresh($, false)
+        }
+      }
+    }
+
+    return response
+  })
+
+  // Draws nothing: the band is asked again whenever the person switches
+  // between the main conversation and a subagent's, which is how the line
+  // learns whose figures to show.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.view.agentId !== viewed) {
+      viewed = e.props.view.agentId
+      await refresh($, false)
+    }
 
     return next(e)
   })
