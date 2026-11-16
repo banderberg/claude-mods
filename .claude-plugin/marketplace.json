@@ -5,7 +5,7 @@
     {
       "name": "model-usage-status",
       "source": "./model-usage-status",
-      "description": "Pins the current model and usage percentages (rate-limit windows, or session cost where there are none, and context) under the prompt."
+      "description": "Pins the current model and usage percentages (rate-limit windows and context) under the prompt."
     }
   ]
 }

@@ -1,5 +1,5 @@
 {
   "name": "model-usage-status",
-  "version": "0.2.0",
-  "description": "Pins the current model and usage percentages (rate-limit windows, or session cost where there are none, and context) under the prompt."
+  "version": "0.3.0",
+  "description": "Pins the current model and usage percentages (rate-limit windows and context) under the prompt."
 }
