@@ -72,3 +72,7 @@ claude plugin install model-usage-status --marketplace banderberg/claude-mods
 In the desktop app, where `/plugin` does not run: click + next to the prompt
 box, then Plugins, Add marketplace with `banderberg/claude-mods`, then Add
 plugin.
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for how the mods work inside, how to check a change and how to release one.
